@@ -1,0 +1,231 @@
+mage-office: xlsx sheets that declare no paper size are exported with none.
+
+A <pageSetup> without paperSize (or no <pageSetup> at all) means "the printer's paper" to Excel.
+The importer gave such sheets Letter and the exporter then wrote paperSize="1" on every sheet. The
+importer now leaves the default size and records the page style in the document InteropGrabBag;
+the exporter omits paperSize while the style still has that size (a paper the user picks since is
+written as usual).
+
+diff --git a/sc/source/filter/excel/xepage.cxx b/sc/source/filter/excel/xepage.cxx
+index 144ab51..e57478b 100644
+--- a/sc/source/filter/excel/xepage.cxx
++++ b/sc/source/filter/excel/xepage.cxx
+@@ -37,6 +37,9 @@
+ #include <xehelper.hxx>
+ #include <xeescher.hxx>
+ #include <xltools.hxx>
++#include <docuno.hxx>
++#include <comphelper/sequenceashashmap.hxx>
++#include <com/sun/star/awt/Size.hpp>
+ 
+ #include <set>
+ #include <limits>
+@@ -98,7 +101,11 @@ XclExpSetup::XclExpSetup( const XclPageData& rPageData ) :
+ void XclExpSetup::SaveXml( XclExpXmlStream& rStrm )
+ {
+     rtl::Reference<sax_fastparser::FastAttributeList> pAttrList = sax_fastparser::FastSerializerHelper::createAttrList();
+-    if( rStrm.getVersion() != oox::core::ISOIEC_29500_2008 ||
++    if( mrData.mbPaperSizeUndeclared )
++    {
++        // the source declared none: Excel uses the printer paper, so do not invent one
++    }
++    else if( rStrm.getVersion() != oox::core::ISOIEC_29500_2008 ||
+         mrData.mnStrictPaperSize != EXC_PAPERSIZE_USER )
+     {
+         pAttrList->add( XML_paperSize,           OString::number(  mrData.mnPaperSize ) );
+@@ -222,6 +229,29 @@ void XclExpPageBreaks::SaveXml( XclExpXmlStream& rStrm )
+ 
+ // Page settings ==============================================================
+ 
++namespace {
++
++/** True, if the imported OOXML file declared no paper size for this page style and the style still
++    has the size it was given then (in either orientation): the user has not chosen a paper since. */
++bool lclIsPaperSizeUndeclared( ScModelObj* pModel, const OUString& rStyleName, const Size& rSize )
++{
++    if( !pModel )
++        return false;
++    const comphelper::SequenceAsHashMap aGrabBag( pModel->getPropertyValue( u"InteropGrabBag"_ustr ) );
++    const auto aStyles = aGrabBag.getUnpackedValueOrDefault(
++        EXC_GRABBAG_UNDECLARED_PAPER, css::uno::Sequence< css::beans::PropertyValue >() );
++    for( const css::beans::PropertyValue& rStyle : aStyles )
++    {
++        css::awt::Size aSize;
++        if( rStyle.Name == rStyleName && ( rStyle.Value >>= aSize ) )
++            return ( aSize.Width == rSize.Width() && aSize.Height == rSize.Height() ) ||
++                   ( aSize.Width == rSize.Height() && aSize.Height == rSize.Width() );
++    }
++    return false;
++}
++
++} // namespace
++
+ XclExpPageSettings::XclExpPageSettings( const XclExpRoot& rRoot ) :
+     XclExpRoot( rRoot )
+ {
+@@ -255,6 +285,8 @@ XclExpPageSettings::XclExpPageSettings( const XclExpRoot& rRoot ) :
+         const SvxPageItem& rPageItem = rItemSet.Get( ATTR_PAGE );
+         const SvxSizeItem& rSizeItem = rItemSet.Get( ATTR_PAGE_SIZE );
+         maData.SetScPaperSize( rSizeItem.GetSize(), !rPageItem.IsLandscape() );
++        maData.mbPaperSizeUndeclared = lclIsPaperSizeUndeclared(
++            GetDocModelObj(), pStyleSheet->GetName(), rSizeItem.GetSize() );
+ 
+         const ScPageScaleToItem& rScaleToItem = rItemSet.Get( ATTR_PAGE_SCALETO );
+         sal_uInt16 nPages = rItemSet.Get( ATTR_PAGE_SCALETOPAGES ).GetValue();
+diff --git a/sc/source/filter/excel/xlpage.cxx b/sc/source/filter/excel/xlpage.cxx
+index 937aa94..21c5cd8 100644
+--- a/sc/source/filter/excel/xlpage.cxx
++++ b/sc/source/filter/excel/xlpage.cxx
+@@ -185,6 +185,7 @@ void XclPageData::SetDefaults()
+     mnHorPrintRes = mnVerPrintRes = 300;
+     mbUseEvenHF = mbUseFirstHF = false;
+     mbValid = false;
++    mbPaperSizeUndeclared = false;
+     mbPortrait = true;
+     mbPrintInRows = mbBlackWhite = mbDraftQuality = mbPrintNotes = mbManualStart = mbFitToPages = false;
+     mbHorCenter = mbVerCenter = mbPrintHeadings = mbPrintGrid = false;
+diff --git a/sc/source/filter/inc/pagesettings.hxx b/sc/source/filter/inc/pagesettings.hxx
+index f951f31..55aaf05 100644
+--- a/sc/source/filter/inc/pagesettings.hxx
++++ b/sc/source/filter/inc/pagesettings.hxx
+@@ -66,6 +66,7 @@ struct PageSettingsModel
+     bool                mbUseEvenHF;            /// True = use maEvenHeader/maEvenFooter.
+     bool                mbUseFirstHF;           /// True = use maFirstHeader/maFirstFooter.
+     bool                mbValidSettings;        /// True = use imported settings.
++    bool                mbPaperSizeDeclared;    /// True = the file declared a paper size or paper dimensions.
+     bool                mbUseFirstPage;         /// True = start page numbering with mnFirstPage.
+     bool                mbBlackWhite;           /// True = print black and white.
+     bool                mbDraftQuality;         /// True = print in draft quality.
+diff --git a/sc/source/filter/inc/xlpage.hxx b/sc/source/filter/inc/xlpage.hxx
+index d200e8b..f0c2788 100644
+--- a/sc/source/filter/inc/xlpage.hxx
++++ b/sc/source/filter/inc/xlpage.hxx
+@@ -93,6 +93,10 @@ const sal_uInt16 EXC_SETUP_NOTES_END        = 0x0200;
+ const sal_uInt16 EXC_PAPERSIZE_DEFAULT      = 0;
+ const sal_uInt16 EXC_PAPERSIZE_USER         = 0xFFFF;
+ 
++/** Document InteropGrabBag entry: the page styles whose OOXML source declared no paper size, each
++    with the size (twips) it was given, so that the OOXML export does not invent one. */
++inline constexpr OUString EXC_GRABBAG_UNDECLARED_PAPER = u"OOXUndeclaredPaperSize"_ustr;
++
+ // Page settings ==============================================================
+ 
+ class SvxBrushItem;
+@@ -139,6 +143,7 @@ struct XclPageData
+     bool                mbUseEvenHF;        /// True = use maHeaderEven/maFooterEven.
+     bool                mbUseFirstHF;       /// True = use maHeaderFirst/maFooterFirst.
+     bool                mbValid;            /// false = some of the values are not valid.
++    bool                mbPaperSizeUndeclared; /// true = the source declared no paper size; write none.
+     bool                mbPortrait;         /// true = portrait; false = landscape.
+     bool                mbPrintInRows;      /// true = in rows; false = in columns.
+     bool                mbBlackWhite;       /// true = black/white; false = colors.
+diff --git a/sc/source/filter/oox/pagesettings.cxx b/sc/source/filter/oox/pagesettings.cxx
+index 825389d..f51a44a 100644
+--- a/sc/source/filter/oox/pagesettings.cxx
++++ b/sc/source/filter/oox/pagesettings.cxx
+@@ -50,6 +50,14 @@
+ #include <biffhelper.hxx>
+ #include <filter/msfilter/util.hxx>
+ #include <o3tl/string_view.hxx>
++#include <docuno.hxx>
++#include <comphelper/propertyvalue.hxx>
++#include <comphelper/sequenceashashmap.hxx>
++#include <editeng/sizeitem.hxx>
++#include <scitems.hxx>
++#include <stlpool.hxx>
++#include <vcl/svapp.hxx>
++#include <xlpage.hxx>
+ 
+ namespace oox::xls {
+ 
+@@ -90,6 +98,28 @@ const sal_uInt16 BIFF12_CHARTPAGESETUP_DEFAULTORIENT= 0x0008;
+ const sal_uInt16 BIFF12_CHARTPAGESETUP_USEFIRSTPAGE = 0x0010;
+ const sal_uInt16 BIFF12_CHARTPAGESETUP_DRAFTQUALITY = 0x0020;
+ 
++/** Remembers, in the document's InteropGrabBag, that the file declared no paper size for this page
++    style, and the size the style got instead, so that the export writes none either. */
++void lclRememberUndeclaredPaperSize( ScDocument& rDoc, const rtl::Reference< ScModelObj >& rxDocument,
++                                     const OUString& rStyleName )
++{
++    SfxStyleSheetBase* pStyle = rDoc.GetStyleSheetPool()->Find( rStyleName, SfxStyleFamily::Page );
++    if( !pStyle || !rxDocument.is() )
++        return;
++    const Size aSize = pStyle->GetItemSet().Get( ATTR_PAGE_SIZE ).GetSize();
++
++    SolarMutexGuard aGuard;
++    comphelper::SequenceAsHashMap aGrabBag( rxDocument->getPropertyValue( u"InteropGrabBag"_ustr ) );
++    Sequence< beans::PropertyValue > aStyles;
++    aGrabBag[ EXC_GRABBAG_UNDECLARED_PAPER ] >>= aStyles;
++    sal_Int32 nCount = aStyles.getLength();
++    aStyles.realloc( nCount + 1 );
++    aStyles.getArray()[ nCount ] = comphelper::makePropertyValue(
++        rStyleName, awt::Size( aSize.Width(), aSize.Height() ) );
++    aGrabBag[ EXC_GRABBAG_UNDECLARED_PAPER ] <<= aStyles;
++    rxDocument->setPropertyValue( u"InteropGrabBag"_ustr, Any( aGrabBag.getAsConstPropertyValueList() ) );
++}
++
+ } // namespace
+ 
+ PageSettingsModel::PageSettingsModel() :
+@@ -116,6 +146,7 @@ PageSettingsModel::PageSettingsModel() :
+     mbUseEvenHF( false ),
+     mbUseFirstHF( false ),
+     mbValidSettings( true ),
++    mbPaperSizeDeclared( false ),
+     mbUseFirstPage( false ),
+     mbBlackWhite( false ),
+     mbDraftQuality( false ),
+@@ -161,6 +192,8 @@ void PageSettings::importPageSetup( const Relations& rRelations, const Attribute
+     OUString aStr;
+     maModel.maBinSettPath   = rRelations.getFragmentPathFromRelId( rAttribs.getString( R_TOKEN( id ), OUString() ) );
+     maModel.mnPaperSize     = rAttribs.getInteger( XML_paperSize, 1 );
++    maModel.mbPaperSizeDeclared = rAttribs.hasAttribute( XML_paperSize ) ||
++        ( rAttribs.hasAttribute( XML_paperWidth ) && rAttribs.hasAttribute( XML_paperHeight ) );
+     aStr                    = rAttribs.getString ( XML_paperWidth, OUString() );
+     ::sax::Converter::convertMeasure(
+             maModel.mnPaperWidth, aStr);
+@@ -189,6 +222,8 @@ void PageSettings::importChartPageSetup( const Relations& rRelations, const Attr
+     OUString aStr;
+     maModel.maBinSettPath   = rRelations.getFragmentPathFromRelId( rAttribs.getString( R_TOKEN( id ), OUString() ) );
+     maModel.mnPaperSize     = rAttribs.getInteger( XML_paperSize, 1 );
++    maModel.mbPaperSizeDeclared = rAttribs.hasAttribute( XML_paperSize ) ||
++        ( rAttribs.hasAttribute( XML_paperWidth ) && rAttribs.hasAttribute( XML_paperHeight ) );
+     aStr                    = rAttribs.getString ( XML_paperWidth, OUString() );
+     ::sax::Converter::convertMeasure(
+             maModel.mnPaperWidth, aStr );
+@@ -255,6 +290,7 @@ void PageSettings::importPageSetup( const Relations& rRelations, SequenceInputSt
+     OUString aRelId;
+     sal_uInt16 nFlags;
+     maModel.mnPaperSize = rStrm.readInt32();
++    maModel.mbPaperSizeDeclared = true;
+     maModel.mnScale = rStrm.readInt32();
+     maModel.mnHorPrintRes = rStrm.readInt32();
+     maModel.mnVerPrintRes = rStrm.readInt32();
+@@ -280,6 +316,7 @@ void PageSettings::importChartPageSetup( const Relations& rRelations, SequenceIn
+     OUString aRelId;
+     sal_uInt16 nFirstPage, nFlags;
+     maModel.mnPaperSize = rStrm.readInt32();
++    maModel.mbPaperSizeDeclared = true;
+     maModel.mnHorPrintRes = rStrm.readInt32();
+     maModel.mnVerPrintRes = rStrm.readInt32();
+     maModel.mnCopies = rStrm.readInt32();
+@@ -329,6 +366,8 @@ void PageSettings::finalizeImport()
+     Reference<style::XStyle> xStyle = createStyleObject(aStyleName, true);
+     PropertySet aStyleProps( xStyle );
+     getPageSettingsConverter().writePageSettingsProperties( aStyleProps, maModel, getSheetType() );
++    if( maModel.mbValidSettings || !maModel.mbPaperSizeDeclared )
++        lclRememberUndeclaredPaperSize( getScDocument(), getDocument(), aStyleName );
+ 
+     // Set page style name to the sheet.
+     SCTAB nTab = getSheetIndex();
+@@ -931,8 +970,8 @@ void PageSettingsConverter::writePageSettingsProperties(
+     if( bChartSheet && ( !rModel.mbValidSettings || (rModel.mnOrientation == XML_default) ) )
+         bLandscape = true;
+ 
+-    // paper size
+-    if( !rModel.mbValidSettings )
++    // paper size (none declared: the style keeps the default size, and export writes none)
++    if( !rModel.mbValidSettings && rModel.mbPaperSizeDeclared )
+     {
+         awt::Size aSize;
+         bool bValid = false;

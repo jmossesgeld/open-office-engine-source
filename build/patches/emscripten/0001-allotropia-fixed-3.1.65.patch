@@ -1,0 +1,116 @@
+diff --git a/src/embind/embind.js b/src/embind/embind.js
+index cb4afca7cb1ef..99044e1d648ce 100644
+--- a/src/embind/embind.js
++++ b/src/embind/embind.js
+@@ -1510,7 +1510,7 @@ var LibraryEmbind = {
+     // at run-time, not build-time.
+     finalizationRegistry = new FinalizationRegistry((info) => {
+ #if ASSERTIONS
+-      console.warn(info.leakWarning.stack.replace(/^Error: /, ''));
++      //HACK: suppressed for now due to <https://github.com/emscripten-core/emscripten/issues/22575> "Embind regression: Leaked C++ object when calling from C++ to JS": console.warn(info.leakWarning);
+ #endif
+       releaseClassHandle(info.$$);
+     });
+@@ -1526,13 +1526,14 @@ var LibraryEmbind = {
+         // This is more useful than the empty stacktrace of `FinalizationRegistry`
+         // callback.
+         var cls = $$.ptrType.registeredClass;
+-        info.leakWarning = new Error(`Embind found a leaked C++ instance ${cls.name} <${ptrToString($$.ptr)}>.\n` +
++        var err = new Error(`Embind found a leaked C++ instance ${cls.name} <${ptrToString($$.ptr)}>.\n` +
+         "We'll free it automatically in this case, but this functionality is not reliable across various environments.\n" +
+         "Make sure to invoke .delete() manually once you're done with the instance instead.\n" +
+         "Originally allocated"); // `.stack` will add "at ..." after this sentence
+         if ('captureStackTrace' in Error) {
+-          Error.captureStackTrace(info.leakWarning, RegisteredPointer_fromWireType);
++          Error.captureStackTrace(err, RegisteredPointer_fromWireType);
+         }
++        info.leakWarning = err.stack.replace(/^Error: /, '');
+ #endif
+         finalizationRegistry.register(handle, info, handle);
+       }
+diff --git a/src/library_pthread.js b/src/library_pthread.js
+index 79ec001921a8a..42159f578c405 100644
+--- a/src/library_pthread.js
++++ b/src/library_pthread.js
+@@ -433,7 +433,7 @@ var LibraryPThread = {
+ #if ENVIRONMENT_MAY_BE_WEB || ENVIRONMENT_MAY_BE_WORKER
+         // This is the way that we signal to the Web Worker that it is hosting
+         // a pthread.
+-        'name': 'em-pthread',
++        'name': 'em-pthread_' + PThread.nextWorkerID,
+ #endif
+       };
+ #if EXPORT_ES6 && USE_ES6_IMPORT_META
+diff --git a/src/shell.js b/src/shell.js
+index d2334a83dac2f..b0599e55a03ed 100644
+--- a/src/shell.js
++++ b/src/shell.js
+@@ -118,7 +118,7 @@ if (Module['ENVIRONMENT']) {
+ 
+ // The way we signal to a worker that it is hosting a pthread is to construct
+ // it with a specific name.
+-var ENVIRONMENT_IS_PTHREAD = ENVIRONMENT_IS_WORKER && self.name == 'em-pthread';
++var ENVIRONMENT_IS_PTHREAD = ENVIRONMENT_IS_WORKER && self.name.startsWith('em-pthread_');
+ 
+ #if MODULARIZE && ASSERTIONS
+ if (ENVIRONMENT_IS_PTHREAD) {
+diff --git a/src/shell_minimal.js b/src/shell_minimal.js
+index 6c2167fd2f312..2602f6684436e 100644
+--- a/src/shell_minimal.js
++++ b/src/shell_minimal.js
+@@ -138,7 +138,7 @@ function ready() {
+ // MINIMAL_RUNTIME does not support --proxy-to-worker option, so Worker and Pthread environments
+ // coincide.
+ var ENVIRONMENT_IS_WORKER = typeof importScripts == 'function';
+-var ENVIRONMENT_IS_PTHREAD = ENVIRONMENT_IS_WORKER && self.name == 'em-pthread';
++var ENVIRONMENT_IS_PTHREAD = ENVIRONMENT_IS_WORKER && self.name.startsWith('em-pthread_');
+ 
+ #if !MODULARIZE
+ // In MODULARIZE mode _scriptName needs to be captured already at the very top of the page immediately when the page is parsed, so it is generated there
+diff --git a/system/lib/html5/callback.c b/system/lib/html5/callback.c
+index 1bec1ea783470..0e7b478c0365c 100644
+--- a/system/lib/html5/callback.c
++++ b/system/lib/html5/callback.c
+@@ -21,6 +21,7 @@ typedef struct callback_args_t {
+ static void do_callback(void* arg) {
+   callback_args_t* args = (callback_args_t*)arg;
+   args->callback(args->event_type, args->event_data, args->user_data);
++  free(arg);
+ }
+ 
+ void _emscripten_run_callback_on_thread(pthread_t t,
+@@ -29,14 +30,13 @@ void _emscripten_run_callback_on_thread(pthread_t t,
+                                         void* event_data,
+                                         void* user_data) {
+   em_proxying_queue* q = emscripten_proxy_get_system_queue();
+-  callback_args_t arg = {
+-    .callback = f,
+-    .event_type = event_type,
+-    .event_data = event_data,
+-    .user_data = user_data,
+-  };
++  callback_args_t* arg = malloc(sizeof(callback_args_t));
++  arg->callback = f;
++  arg->event_type = event_type;
++  arg->event_data = event_data;
++  arg->user_data = user_data;
+ 
+-  if (!emscripten_proxy_sync(q, t, do_callback, &arg)) {
+-    assert(false && "emscripten_proxy_sync failed");
++  if (!emscripten_proxy_async(q, t, do_callback, arg)) {
++    assert(false && "emscripten_proxy_async failed");
+   }
+ }
+diff --git a/tools/link.py b/tools/link.py
+index b6d9261b088aa..ade8b3612609b 100644
+--- a/tools/link.py
++++ b/tools/link.py
+@@ -2450,7 +2450,7 @@ def modularize():
+     # when running in MODULARIZE mode we need use this to know if we should
+     # run the module constructor on startup (true only for pthreads).
+     if settings.ENVIRONMENT_MAY_BE_WEB or settings.ENVIRONMENT_MAY_BE_WORKER:
+-      src += "var isPthread = globalThis.self?.name === 'em-pthread';\n"
++      src += "var isPthread = globalThis.self?.name.startsWith('em-pthread_');\n"
+       # In order to support both web and node we also need to detect node here.
+       if settings.ENVIRONMENT_MAY_BE_NODE:
+         src += "var isNode = typeof globalThis.process?.versions?.node == 'string';\n"

@@ -1,0 +1,125 @@
+mage-office: xlsx fonts without <name>/<sz> inherit the workbook default font, not Cambria.
+
+ExcelJS (and other generators) write bold or coloured fonts as <font><b/></font>. Excel shows them
+in the workbook default font (Calibri); the importer started every font from a hard-coded "Cambria"
+theme fallback, so edited exports came back with serif headings.
+
+diff --git a/sc/source/filter/inc/stylesbuffer.hxx b/sc/source/filter/inc/stylesbuffer.hxx
+index c462da4..0fc43d1 100644
+--- a/sc/source/filter/inc/stylesbuffer.hxx
++++ b/sc/source/filter/inc/stylesbuffer.hxx
+@@ -238,6 +238,10 @@ public:
+         finalizeImport() has been called. */
+     const FontModel& getModel() const { return maModel; }
+ 
++    /** Gives a font that declared no name (or no size) the name (or size) of the
++        workbook default font, as Excel does. Must be called before finalizeImport(). */
++    void                inheritUndeclared( const FontModel& rDefModel );
++
+     /** Final processing after import of all style settings. */
+     void                finalizeImport();
+ 
+@@ -261,6 +265,8 @@ private:
+     ApiFontData         maApiData;
+     ApiFontUsedFlags    maUsedFlags;
+     bool                mbDxf;
++    bool                mbNameDeclared;     /// The file gave this font a name.
++    bool                mbHeightDeclared;   /// The file gave this font a size.
+ };
+ 
+ typedef std::shared_ptr< Font > FontRef;
+diff --git a/sc/source/filter/oox/stylesbuffer.cxx b/sc/source/filter/oox/stylesbuffer.cxx
+index 2310f32..5de40c3 100644
+--- a/sc/source/filter/oox/stylesbuffer.cxx
++++ b/sc/source/filter/oox/stylesbuffer.cxx
+@@ -550,7 +550,9 @@ Font::Font( const WorkbookHelper& rHelper, bool bDxf ) :
+     WorkbookHelper( rHelper ),
+     maModel( rHelper.getTheme().getDefaultFontModel() ),
+     maUsedFlags( !bDxf ),
+-    mbDxf( bDxf )
++    mbDxf( bDxf ),
++    mbNameDeclared( false ),
++    mbHeightDeclared( false )
+ {
+ }
+ 
+@@ -558,8 +560,22 @@ Font::Font( const WorkbookHelper& rHelper, FontModel aModel ) :
+     WorkbookHelper( rHelper ),
+     maModel(std::move( aModel )),
+     maUsedFlags( true ),
+-    mbDxf( false )
++    mbDxf( false ),
++    mbNameDeclared( true ),
++    mbHeightDeclared( true )
++{
++}
++
++void Font::inheritUndeclared( const FontModel& rDefModel )
+ {
++    // A <font> without <name> (as ExcelJS writes bold or coloured fonts) is shown by Excel in the
++    // workbook default font, not in the theme fallback this importer starts every font from.
++    if( mbDxf )
++        return;
++    if( !mbNameDeclared && !rDefModel.maName.isEmpty() )
++        maModel.maName = rDefModel.maName;
++    if( !mbHeightDeclared && rDefModel.mfHeight > 0.0 )
++        maModel.mfHeight = rDefModel.mfHeight;
+ }
+ 
+ void Font::importAttribs( sal_Int32 nElement, const AttributeList& rAttribs )
+@@ -573,6 +589,7 @@ void Font::importAttribs( sal_Int32 nElement, const AttributeList& rAttribs )
+             {
+                 maModel.maName = rAttribs.getXString( XML_val, OUString() );
+                 maUsedFlags.mbNameUsed = true;
++                mbNameDeclared = true;
+             }
+         break;
+         case XLS_TOKEN( scheme ):
+@@ -587,6 +604,7 @@ void Font::importAttribs( sal_Int32 nElement, const AttributeList& rAttribs )
+         case XLS_TOKEN( sz ):
+             maModel.mfHeight = rAttribs.getDouble( XML_val, rDefModel.mfHeight );
+             maUsedFlags.mbHeightUsed = true;
++            mbHeightDeclared = true;
+         break;
+         case XLS_TOKEN( color ):
+             maModel.maColor.importColor( rAttribs );
+@@ -640,6 +658,8 @@ void Font::importFont( SequenceInputStream& rStrm )
+     rStrm >> maModel.maColor;
+     nScheme = rStrm.readuChar();
+     rStrm >> maModel.maName;
++    // BIFF12 font records always carry a name and a height.
++    mbNameDeclared = mbHeightDeclared = true;
+ 
+     // equal constants in all BIFFs for weight, underline, and escapement
+     maModel.setBiff12Scheme( nScheme );
+@@ -2884,6 +2904,15 @@ void StylesBuffer::importCellStyle( SequenceInputStream& rStrm )
+ 
+ void StylesBuffer::finalizeImport()
+ {
++    // fonts that declare no name or size take them from the workbook default font; copy its model,
++    // since the default font itself may be one of the fonts being completed
++    if( FontRef xDefFont = getDefaultFont() )
++    {
++        const FontModel aDefModel = xDefFont->getModel();
++        for( const FontRef& xFont : maFonts )
++            if( xFont )
++                xFont->inheritUndeclared( aDefModel );
++    }
+     // fonts first, are needed to finalize unit converter and XFs below
+     maFonts.forEachMem( &Font::finalizeImport );
+     // finalize unit coefficients after default font is known
+diff --git a/sc/source/filter/oox/themebuffer.cxx b/sc/source/filter/oox/themebuffer.cxx
+index 3c82a31..8f1bc8d 100644
+--- a/sc/source/filter/oox/themebuffer.cxx
++++ b/sc/source/filter/oox/themebuffer.cxx
+@@ -28,8 +28,9 @@ ThemeBuffer::ThemeBuffer( const WorkbookHelper& rHelper ) :
+     WorkbookHelper( rHelper ),
+     mxDefFontModel( new FontModel )
+ {
++    // Excel's default body font since 2007. Only used when the workbook's own default font is unnamed.
+     //! TODO: locale dependent font name
+-    mxDefFontModel->maName = "Cambria";
++    mxDefFontModel->maName = "Calibri";
+     mxDefFontModel->mfHeight = 11.0;
+ }
+ 

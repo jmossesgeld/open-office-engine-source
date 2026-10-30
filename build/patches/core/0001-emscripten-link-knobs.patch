@@ -1,0 +1,35 @@
+mage-office: make the engine memory size, memory growth and ASSERTIONS selectable at make time.
+
+diff --git a/solenv/gbuild/platform/EMSCRIPTEN_INTEL_GCC.mk b/solenv/gbuild/platform/EMSCRIPTEN_INTEL_GCC.mk
+index 613cb0b..1a974b4 100644
+--- a/solenv/gbuild/platform/EMSCRIPTEN_INTEL_GCC.mk
++++ b/solenv/gbuild/platform/EMSCRIPTEN_INTEL_GCC.mk
+@@ -14,8 +14,17 @@ gb_RUN_CONFIGURE := $(SRCDIR)/solenv/bin/run-configure
+ gb_EMSCRIPTEN_CPPFLAGS := -pthread -s USE_PTHREADS=1 -D_LARGEFILE64_SOURCE -D_LARGEFILE_SOURCE -s SUPPORT_LONGJMP=wasm
+ gb_EMSCRIPTEN_LDFLAGS := $(gb_EMSCRIPTEN_CPPFLAGS)
+ 
+-# Initial memory size
+-gb_EMSCRIPTEN_LDFLAGS += -s TOTAL_MEMORY=1GB
++# Initial memory size. Override on the make command line: EMSCRIPTEN_INITIAL_MEMORY=512MB, and set
++# EMSCRIPTEN_MAXIMUM_MEMORY=2GB (or similar) to let the shared memory grow instead of being fixed.
++EMSCRIPTEN_INITIAL_MEMORY ?= 1GB
++gb_EMSCRIPTEN_LDFLAGS += -s TOTAL_MEMORY=$(EMSCRIPTEN_INITIAL_MEMORY)
++ifneq ($(EMSCRIPTEN_MAXIMUM_MEMORY),)
++gb_EMSCRIPTEN_LDFLAGS += -s ALLOW_MEMORY_GROWTH=1 -s MAXIMUM_MEMORY=$(EMSCRIPTEN_MAXIMUM_MEMORY)
++endif
++
++# ASSERTIONS=1 keeps the link cheap (see below); EMSCRIPTEN_ASSERTIONS=0 on the make command line
++# produces a release link without the runtime's debug checks.
++EMSCRIPTEN_ASSERTIONS ?= 1
+ 
+ ifeq ($(ENABLE_EMSCRIPTEN_PROXY_TO_PTHREAD),)
+ gb_EMSCRIPTEN_LDFLAGS += -sPTHREAD_POOL_SIZE=6
+@@ -27,7 +36,7 @@ gb_EMSCRIPTEN_LDFLAGS += -sSTACK_SIZE=131072 -sDEFAULT_PTHREAD_STACK_SIZE=65536
+ # To keep the link time (and memory) down, prevent all rewriting options from wasm-emscripten-finalize
+ # See emscripten.py, finalize_wasm, modify_wasm = True
+ # So we need WASM_BIGINT=1 and ASSERTIONS=1 (2 implies STACK_OVERFLOW_CHECK)
+-gb_EMSCRIPTEN_LDFLAGS += --bind -s FORCE_FILESYSTEM=1 -s WASM_BIGINT=1 -s ERROR_ON_UNDEFINED_SYMBOLS=1 -s FETCH=1 -s ASSERTIONS=1 -s EXIT_RUNTIME=0 -s EXPORTED_RUNTIME_METHODS=["UTF16ToString","stringToUTF16","UTF8ToString","ccall","cwrap","addOnPreMain","addOnPostRun","registerType","throwBindingError","ClassHandle"$(if $(ENABLE_QT6),$(COMMA)"FS"$(COMMA)"callMain"$(COMMA)"specialHTMLTargets")]
++gb_EMSCRIPTEN_LDFLAGS += --bind -s FORCE_FILESYSTEM=1 -s WASM_BIGINT=1 -s ERROR_ON_UNDEFINED_SYMBOLS=1 -s FETCH=1 -s ASSERTIONS=$(EMSCRIPTEN_ASSERTIONS) -s EXIT_RUNTIME=0 -s EXPORTED_RUNTIME_METHODS=["UTF16ToString","stringToUTF16","UTF8ToString","ccall","cwrap","addOnPreMain","addOnPostRun","registerType","throwBindingError","ClassHandle"$(if $(ENABLE_QT6),$(COMMA)"FS"$(COMMA)"callMain"$(COMMA)"specialHTMLTargets")]
+ gb_EMSCRIPTEN_QTDEFS := -DQT_NO_LINKED_LIST -DQT_NO_JAVA_STYLE_ITERATORS -DQT_NO_EXCEPTIONS -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB
+ 
+ ifeq ($(ENABLE_EMSCRIPTEN_JSPI),TRUE)

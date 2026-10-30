@@ -1,0 +1,18 @@
+mage-office: keep the exports pthread workers need in an optimized (ASSERTIONS=0) link.
+
+Emscripten 3.1.65 requires _embind_initialize_bindings and _emscripten_thread_crashed for
+pthreads, but an optimizing link without ASSERTIONS removes exports that are not in
+EXPORTED_FUNCTIONS, so every worker died with "__embind_initialize_bindings is not defined".
+
+diff --git a/desktop/util/Executable_soffice_bin-emscripten-exports b/desktop/util/Executable_soffice_bin-emscripten-exports
+index 2206ccc..2073ab5 100644
+--- a/desktop/util/Executable_soffice_bin-emscripten-exports
++++ b/desktop/util/Executable_soffice_bin-emscripten-exports
+@@ -12,3 +12,7 @@ _lok_preinit
+ _lok_preinit_2
+ _malloc
+ _free
++# mage-office: the pthread worker calls these by name (runtime_pthread.js); without ASSERTIONS the
++# optimizing link drops every export not listed here, and each worker then fails as it starts.
++__embind_initialize_bindings
++__emscripten_thread_crashed

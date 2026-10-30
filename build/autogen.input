@@ -1,0 +1,9 @@
+--with-distro=LibreOfficeWASM32
+--without-java
+--disable-odk
+--disable-report-builder
+--disable-online-update
+--without-help
+--without-myspell-dicts
+--with-lang=en-US
+--with-external-tar=/cache/tarballs
